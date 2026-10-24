@@ -1,0 +1,125 @@
+#!/bin/bash
+# /opt/tuxler-wine/app/chromium-tux — Chromium launcher wired for this container.
+#
+# Why this exists:
+#   After the XFCE -> openbox teardown the D-Bus *session* bus survived but
+#   Chromium was sometimes started without DBUS_SESSION_BUS_ADDRESS. Chromium
+#   needs the xdg-desktop-portal (for menus / link clicks / file pickers), so
+#   without it right-click menus silently did nothing and links did not
+#   navigate. This script always exports the right environment, makes sure the
+#   session bus + portal daemons are alive, and ALWAYS uses the real profile
+#   (/root/.config/chromium) so the installed extensions load.
+#
+# Usage:  chromium-tux [standard|us|vnc] [URL...]
+#         chromium-tux --fresh      # also wipe the temp test profiles
+
+set -u
+
+export HOME=/root
+export DISPLAY="${DISPLAY:-:99}"
+
+# ---------------------------------------------------------------- session bus
+# Discover the live session-bus socket instead of hardcoding the address
+# (it changes every time dbus-launch restarts).
+DBUS_SOCK=""
+for s in /tmp/dbus-*; do
+  [ -S "$s" ] && DBUS_SOCK="$s" && break
+done
+if [ -n "$DBUS_SOCK" ]; then
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_SOCK"
+  export DBUS_SESSION_BUS_PID="$(pgrep -x dbus-daemon | head -1)"
+fi
+
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-openbox}"
+export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
+mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null
+chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null
+
+# ------------------------------------------------------------ portal daemons
+# Chromium's menu/click handling depends on these being on the session bus.
+portals_up() {
+  pgrep -f '/usr/libexec/xdg-desktop-portal$' >/dev/null 2>&1
+}
+portals_gtk_up() {
+  pgrep -f '/usr/libexec/xdg-desktop-portal-gtk$' >/dev/null 2>&1
+}
+if ! portals_up; then
+  /usr/libexec/xdg-desktop-portal >>/var/log/tuxler/xdg-desktop-portal.log 2>&1 &
+  sleep 1
+fi
+if ! portals_gtk_up; then
+  /usr/libexec/xdg-desktop-portal-gtk >>/var/log/tuxler/xdg-desktop-portal-gtk.log 2>&1 &
+  sleep 1
+fi
+
+# ------------------------------------------------------------- real profile
+# NOTE: the installed extensions (SwitchyOmega / webrtc control / PDF viewer)
+# live in this profile's Default/Extensions. Do NOT switch to a --tmp profile.
+PROFILE=/root/.config/chromium
+
+# Handle profile type
+PROFILE_TYPE="${1:-standard}"
+if [ "$PROFILE_TYPE" != "standard" ] && [ "$PROFILE_TYPE" != "us" ] && [ "$PROFILE_TYPE" != "vnc" ]; then
+  # If it's not a profile type, treat it as a URL
+  PROFILE_TYPE="standard"
+  set -- "$PROFILE_TYPE" "$@"
+fi
+
+# Shift past the profile type
+shift
+
+if [ "${1:-}" = "--fresh" ]; then
+  shift
+  rm -rf /tmp/chromium-test /tmp/chromium-test2 /tmp/chromium-test3 2>/dev/null
+fi
+
+# Keep the growing logs bounded (they now live on disk, not tmpfs).
+for lf in /var/log/tuxler/geo-gate.log /var/log/tuxler/tuxler.log \
+          /var/log/tuxler/socks5shim.log /var/log/tuxler/chromium.log; do
+  [ -f "$lf" ] || continue
+  sz=$(stat -c %s "$lf" 2>/dev/null || echo 0)
+  [ "$sz" -gt 20971520 ] && truncate -s 0 "$lf"
+done
+
+# NOTE: no --disable-extensions-except / no --load-extension here — the
+# installed extensions (SwitchyOmega etc.) must come from the real profile.
+# --disable-gpu + a small renderer cap keep us inside the 2GB cgroup limit;
+# the GPU path fails on Xvfb anyway.
+
+# Chromium arguments based on profile type
+CHROMIUM_ARGS=(
+  --user-data-dir="$PROFILE"
+  --no-first-run
+  --no-default-browser-check
+  --disable-gpu
+  --renderer-process-limit=2
+  --remote-debugging-port=9222
+)
+
+# Add profile-specific arguments
+case "$PROFILE_TYPE" in
+  "us")
+    CHROMIUM_ARGS+=(
+      --proxy-server="socks5://127.0.0.1:23322"
+      --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"
+    )
+    ;;
+  "vnc")
+    CHROMIUM_ARGS+=(
+      --proxy-server="socks5://127.0.0.1:23322"
+      --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"
+      --window-position=0,0
+      --window-size=1280,720
+    )
+    ;;
+  "standard")
+    CHROMIUM_ARGS+=(
+      --proxy-server="socks5://127.0.0.1:23322"
+      --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"
+    )
+    ;;
+esac
+
+# Start Chromium
+exec /usr/bin/chromium "${CHROMIUM_ARGS[@]}" "$@"

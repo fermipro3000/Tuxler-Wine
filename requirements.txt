@@ -1,0 +1,6 @@
+# Python dependencies for Tuxler-Wine
+requests>=2.25.1
+geopy>=2.2.0
+psutil>=5.8.0
+pysocks>=1.7.1
+python-socks>=2.0.0
