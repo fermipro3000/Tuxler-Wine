@@ -24,7 +24,7 @@ The geo gate continuously checks the exit IP through Tuxler and only allows conn
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/Tuxler-Wine.git
+   git clone https://github.com/fermipro3000/Tuxler-Wine.git
    cd Tuxler-Wine
    ```
 
